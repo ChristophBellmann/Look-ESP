@@ -1,0 +1,25 @@
+# Build‐Ordner
+/build/
+/build/
+
+# IDF‐Cache, Ninja, CMake‐Artefakte
+CMakeCache.txt
+CMakeFiles/
+build.ninja
+
+# SDKConfig
+sdkconfig
+sdkconfig.old
+
+# Python‐ und Editor‐Artefakte
+*.pyc
+__pycache__/
+*.swp
+*.bak
+
+# Logs
+*.log
+
+# ESP-IDF Toolchain Virtualenv
+.venv/
+.python-version
