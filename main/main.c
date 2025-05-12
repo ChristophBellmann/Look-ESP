@@ -62,13 +62,17 @@ static void init_camera_xclk(void)
     ESP_LOGI(TAG, "XCLK 20 MHz auf GPIO%d aktiviert", XCLK_GPIO_NUM);
 }
 
-// 2) Reset-Pin (PWDN) hochziehen
+// 2) Reset-Pin (RESET_GPIO_NUM) hochziehen, PWDN optional umgehen
 static void reset_camera(void)
 {
-    gpio_reset_pin(PWDN_GPIO_NUM);
-    gpio_set_direction(PWDN_GPIO_NUM, GPIO_MODE_OUTPUT);
-    gpio_set_level(PWDN_GPIO_NUM, 1);
-    ESP_LOGI(TAG, "Reset-Pin (GPIO%d) HIGH, Sensor aus Reset", PWDN_GPIO_NUM);
+    if (RESET_GPIO_NUM >= 0 && GPIO_IS_VALID_GPIO(RESET_GPIO_NUM)) {
+        gpio_reset_pin(RESET_GPIO_NUM);
+        gpio_set_direction(RESET_GPIO_NUM, GPIO_MODE_OUTPUT);
+        gpio_set_level(RESET_GPIO_NUM, 1);
+        ESP_LOGI(TAG, "Reset-Pin (GPIO%d) HIGH, Sensor aus Reset", RESET_GPIO_NUM);
+    } else {
+        ESP_LOGW(TAG, "No valid RESET pin configured, skipping reset");
+    }
 }
 
 // 3) OV5640 Autofokus per Sensor-API
@@ -90,7 +94,6 @@ static void ov5640_autofocus(void)
     sensor->set_reg(sensor, 0x3022, 0xFF, 0x00);
 }
 
-// 4) Kamera initialisieren (5 MP, PSRAM, Autofokus & SCCB)
 static void init_camera(void)
 {
     reset_camera();
@@ -102,8 +105,8 @@ static void init_camera(void)
     gpio_set_pull_mode(SIOC_GPIO_NUM, GPIO_PULLUP_ONLY);
 
     camera_config_t config = {
-        .pin_pwdn       = PWDN_GPIO_NUM,
-        .pin_reset      = RESET_GPIO_NUM,
+        .pin_pwdn       = PWDN_GPIO_NUM,     // meist -1 auf diesem Board
+        .pin_reset      = RESET_GPIO_NUM,    // ≧0 → richtiger Reset-Pin
         .pin_xclk       = XCLK_GPIO_NUM,
         .pin_sscb_sda   = SIOD_GPIO_NUM,
         .pin_sscb_scl   = SIOC_GPIO_NUM,
@@ -122,10 +125,10 @@ static void init_camera(void)
         .ledc_timer     = LEDC_TIMER_0,
         .ledc_channel   = LEDC_CHANNEL_0,
         .pixel_format   = PIXFORMAT_JPEG,
-        .frame_size     = FRAMESIZE_5MP,    // 5 Megapixel
-        .jpeg_quality   = 10,               // hohe Qualität
-        .fb_count       = 2,                // zwei Buffers in PSRAM
-        .grab_mode      = CAMERA_GRAB_LATEST,
+        .frame_size     = FRAMESIZE_UXGA,
+        .jpeg_quality   = 10,
+        .fb_count       = 1,
+        .grab_mode      = CAMERA_GRAB_WHEN_EMPTY,
         .sccb_i2c_port  = I2C_NUM_1,
     };
     esp_err_t err = esp_camera_init(&config);
@@ -139,12 +142,40 @@ static void init_camera(void)
 // 5) Snapshot-Handler (Autofokus + Foto)
 static esp_err_t snapshot_handler(httpd_req_t *req)
 {
-    ov5640_autofocus();
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) return httpd_resp_send_500(req);
+    camera_fb_t *fb = NULL;
+    // Bis zu 5 Versuche, jeweils 100 ms warten
+    for (int i = 0; i < 5; i++) {
+        fb = esp_camera_fb_get();
+        if (!fb) {
+            ESP_LOGW(TAG, "Attempt %d: No frame yet, retrying...", i+1);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        // Prüfe JPEG-Start (SOI)
+        if (fb->len >= 2 && fb->buf[0] == 0xFF && fb->buf[1] == 0xD8) {
+            break;  // gültiger Frame
+        }
+        // ungültiger Frame: freigeben und erneut holen
+        ESP_LOGW(TAG, "Attempt %d: Frame without SOI, discarding...", i+1);
+        esp_camera_fb_return(fb);
+        fb = NULL;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    if (!fb) {
+        ESP_LOGE(TAG, "Camera capture failed after retries");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Camera capture failed");
+        return ESP_FAIL;
+    }
+
+    // Erfolgreich: JPEG zurückliefern
     httpd_resp_set_type(req, "image/jpeg");
     esp_err_t res = httpd_resp_send(req, (const char*)fb->buf, fb->len);
     esp_camera_fb_return(fb);
+    if (res != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_resp_send snapshot failed: %d", res);
+    }
     return res;
 }
 
@@ -190,13 +221,14 @@ void app_main(void)
     );
 
     // 2) Kamera initialisieren
-   // init_camera();
+    init_camera();
 
     ESP_LOGI(TAG, "After init_camera()");
 
-    // 3) HTTP-Server aufsetzen (/ , /snapshot , /stream)
-    start_webserver();
-
+    // 3) HTTP-Server aufsetzen
+    if (start_webserver() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start webserver");
+    }
     ESP_LOGI(TAG, "After start_webserver()");
 
     // 4) Idle-Loop

@@ -1,3 +1,6 @@
 // main/http_server.h
 #pragma once
-void start_webserver(void);
+#include "esp_err.h"
+
+// Startet den HTTP-Server und registriert alle URIs
+esp_err_t start_webserver(void);
