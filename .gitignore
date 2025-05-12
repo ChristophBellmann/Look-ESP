@@ -1,6 +1,6 @@
 # Build‐Ordner
 /build/
-/build/
+build
 
 # IDF‐Cache, Ninja, CMake‐Artefakte
 CMakeCache.txt
