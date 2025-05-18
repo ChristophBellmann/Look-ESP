@@ -2,6 +2,7 @@
 #include "esp_http_server.h"
 #include "esp_camera.h"
 #include "esp_log.h"
+#include "camera.h"
 
 static const char *TAG = "http";
 
@@ -28,56 +29,6 @@ static esp_err_t index_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, index_html, HTTPD_RESP_USE_STRLEN);
-}
-
-// Handler für Snapshot (/snapshot)
-static esp_err_t snapshot_handler(httpd_req_t *req)
-{
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) {
-        ESP_LOGE(TAG, "Camera capture failed");
-        // eine kurze Fehlermeldung in die HTTP-Antwort schreiben
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Camera capture failed");
-        return ESP_FAIL;
-    }
-    // erfolgreichen JPEG-Blob zurückgeben
-    httpd_resp_set_type(req, "image/jpeg");
-    esp_err_t res = httpd_resp_send(req, (const char*)fb->buf, fb->len);
-    esp_camera_fb_return(fb);
-    if (res != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_resp_send snapshot failed: %d", res);
-    }
-    return res;
-}
-
-// Handler für MJPEG-Stream (/stream)
-static esp_err_t stream_handler(httpd_req_t *req)
-{
-    httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=frame");
-    while (true) {
-        camera_fb_t *fb = esp_camera_fb_get();
-        if (!fb) {
-            ESP_LOGE(TAG, "Camera capture failed in stream");
-            break;
-        }
-        char header[64];
-        int h = snprintf(header, sizeof(header),
-                         "--frame\r\n"
-                         "Content-Type: image/jpeg\r\n"
-                         "Content-Length: %u\r\n\r\n",
-                         fb->len);
-        // Header und JPEG-Blob senden
-        if (httpd_resp_send_chunk(req, header, h) != ESP_OK ||
-            httpd_resp_send_chunk(req, (const char*)fb->buf, fb->len) != ESP_OK ||
-            httpd_resp_send_chunk(req, "\r\n", 2) != ESP_OK) {
-            ESP_LOGW(TAG, "Client disconnected or send error");
-            esp_camera_fb_return(fb);
-            break;
-        }
-        esp_camera_fb_return(fb);
-        vTaskDelay(pdMS_TO_TICKS(100));  // ~10 FPS
-    }
-    return ESP_FAIL;
 }
 
 esp_err_t start_webserver(void)
